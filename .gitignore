@@ -1,5 +1,6 @@
 # ===== AI Agent (personal) =====
 **/CLAUDE.md
+/AGENTS.md
 .claude/
 .cursor/
 
@@ -25,5 +26,6 @@ outputs/
 infra_logs/
 
 # ===== Rust =====
+/Cargo.lock
 target/
 **/target/

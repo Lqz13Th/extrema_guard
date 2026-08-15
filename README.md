@@ -77,5 +77,3 @@ cargo check
 cargo test
 cargo clippy -- -D warnings
 ```
-
-See `AGENTS.md` for repository-specific implementation guidance.
