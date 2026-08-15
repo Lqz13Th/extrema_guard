@@ -4,23 +4,24 @@ use tracing::{error, info};
 
 use extrema_infra::prelude::*;
 
-use super::base::StaticProtect;
+use super::base::OkxOutsideRangeCancel;
 
-impl Strategy for StaticProtect {
+impl Strategy for OkxOutsideRangeCancel {
     async fn initialize(&mut self) {
-        if !self.enabled || self.rules.is_empty() {
-            info!("static protect has no rules configured; module stays inert");
-            return;
+        if self.config.enabled {
+            info!(
+                outside_seconds = self.config.outside_seconds,
+                "initializing OKX outside-range cancel"
+            );
         }
-        info!(rules = self.rules.len(), "initializing static protect");
     }
 
     fn strategy_name(&self) -> &'static str {
-        "StaticProtect"
+        "OkxOutsideRangeCancel"
     }
 }
 
-impl CommandEmitter for StaticProtect {
+impl CommandEmitter for OkxOutsideRangeCancel {
     fn command_init(&mut self, command_registry: Arc<CommandRegistry>) {
         self.command_registry = command_registry;
     }
@@ -30,13 +31,13 @@ impl CommandEmitter for StaticProtect {
     }
 }
 
-impl EventHandler for StaticProtect {
+impl EventHandler for OkxOutsideRangeCancel {
     async fn on_schedule(&mut self, msg: InfraMsg<AltScheduleEvent>) {
-        if !self.enabled || msg.task_id != self.schedule_task_id || self.rules.is_empty() {
+        if !self.config.enabled || msg.task_id != self.config.schedule_task_id {
             return;
         }
         if let Err(err) = self.reconcile().await {
-            error!(error = ?err, "static protect reconcile failed");
+            error!(error = ?err, "outside-range cancel reconcile failed");
         }
     }
 }

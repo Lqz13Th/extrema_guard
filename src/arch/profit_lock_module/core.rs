@@ -8,7 +8,7 @@ use super::base::ProfitLock;
 
 impl Strategy for ProfitLock {
     async fn initialize(&mut self) {
-        if self.rules.is_empty() {
+        if !self.enabled || self.rules.is_empty() {
             info!("profit lock has no rules configured; module stays inert");
             return;
         }
@@ -32,7 +32,7 @@ impl CommandEmitter for ProfitLock {
 
 impl EventHandler for ProfitLock {
     async fn on_schedule(&mut self, msg: InfraMsg<AltScheduleEvent>) {
-        if msg.task_id != self.schedule_task_id || self.rules.is_empty() {
+        if !self.enabled || msg.task_id != self.schedule_task_id || self.rules.is_empty() {
             return;
         }
         if let Err(err) = self.reconcile().await {

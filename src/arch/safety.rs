@@ -1,5 +1,3 @@
-use super::config::GuardConfig;
-
 /// Hard limits every outgoing action must pass. Constructed from config once;
 /// there is no code path that bypasses them.
 #[derive(Clone, Debug)]
@@ -9,10 +7,10 @@ pub struct SafetyLimits {
 }
 
 impl SafetyLimits {
-    pub fn from_config(config: &GuardConfig) -> Self {
+    pub fn new(max_order_notional: f64, min_action_interval_ms: u64) -> Self {
         Self {
-            max_order_notional: config.guard.max_order_notional,
-            min_action_interval_ms: config.guard.min_action_interval_ms,
+            max_order_notional,
+            min_action_interval_ms,
         }
     }
 

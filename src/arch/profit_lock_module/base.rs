@@ -8,12 +8,9 @@ use tracing::{error, info};
 
 use extrema_infra::prelude::*;
 
-use crate::arch::common::{
-    config::{ProfitLockRule, ProfitLockSection},
-    executor::{GuardExecutor, position_key},
-};
+use crate::arch::executor::{GuardExecutor, position_key};
 
-use super::utils::{armed, lock_price};
+use super::utils::{ProfitLockConfig, ProfitLockRule, armed, lock_price};
 
 const REFIRE_AFTER: Duration = Duration::from_secs(30);
 
@@ -24,6 +21,7 @@ const REFIRE_AFTER: Duration = Duration::from_secs(30);
 /// re-accumulates from the current mark after a restart.
 #[derive(Clone)]
 pub struct ProfitLock {
+    pub enabled: bool,
     pub rules: Vec<ProfitLockRule>,
     pub schedule_task_id: u64,
     pub executor: GuardExecutor,
@@ -33,14 +31,11 @@ pub struct ProfitLock {
 }
 
 impl ProfitLock {
-    pub fn new(
-        section: &ProfitLockSection,
-        schedule_task_id: u64,
-        executor: GuardExecutor,
-    ) -> Self {
+    pub fn new(config: &ProfitLockConfig, executor: GuardExecutor) -> Self {
         Self {
-            rules: section.rules.clone(),
-            schedule_task_id,
+            enabled: config.enabled,
+            rules: config.rules.clone(),
+            schedule_task_id: config.schedule_task_id,
             executor,
             command_registry: Arc::default(),
             water: HashMap::new(),

@@ -8,12 +8,11 @@ use tracing::{error, info, warn};
 
 use extrema_infra::prelude::*;
 
-use crate::arch::common::{
-    config::{StaticProtectSection, StaticRule},
-    executor::{GuardExecutor, PositionSnapshot, position_key},
-};
+use crate::arch::executor::{GuardExecutor, PositionSnapshot, position_key};
 
-use super::utils::{offset_from_pct, offset_from_risk, stop_price, target_price};
+use super::utils::{
+    StaticProtectConfig, StaticRule, offset_from_pct, offset_from_risk, stop_price, target_price,
+};
 
 const REFIRE_AFTER: Duration = Duration::from_secs(30);
 
@@ -22,6 +21,7 @@ const REFIRE_AFTER: Duration = Duration::from_secs(30);
 /// as a reduce-only limit; the stop-loss is soft-triggered by this loop.
 #[derive(Clone)]
 pub struct StaticProtect {
+    pub enabled: bool,
     pub rules: Vec<StaticRule>,
     pub schedule_task_id: u64,
     pub executor: GuardExecutor,
@@ -33,14 +33,11 @@ pub struct StaticProtect {
 }
 
 impl StaticProtect {
-    pub fn new(
-        section: &StaticProtectSection,
-        schedule_task_id: u64,
-        executor: GuardExecutor,
-    ) -> Self {
+    pub fn new(config: &StaticProtectConfig, executor: GuardExecutor) -> Self {
         Self {
-            rules: section.rules.clone(),
-            schedule_task_id,
+            enabled: config.enabled,
+            rules: config.rules.clone(),
+            schedule_task_id: config.schedule_task_id,
             executor,
             command_registry: Arc::default(),
             known: HashSet::new(),

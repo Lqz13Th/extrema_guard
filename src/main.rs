@@ -5,10 +5,22 @@ use tracing::info;
 use extrema_infra::prelude::*;
 
 use extrema_guard::arch::{
-    common::{config::load_guard_config, executor::GuardExecutor},
+    executor::{GuardExecutor, load_guard_executor_config},
+    okx_outside_range_cancel_module::{
+        base::OkxOutsideRangeCancel, utils::load_okx_outside_range_cancel_config,
+    },
     profit_lock_module::base::ProfitLock,
-    static_protect_module::base::StaticProtect,
+    profit_lock_module::utils::load_profit_lock_config,
+    static_protect_module::{base::StaticProtect, utils::load_static_protect_config},
 };
+
+fn schedule_task(duration_sec: u64, task_id: u64) -> AltTaskInfo {
+    AltTaskInfo {
+        alt_task_type: AltTaskType::TimeScheduler(Duration::from_secs(duration_sec)),
+        chunk: 1,
+        task_base_id: Some(task_id),
+    }
+}
 
 #[tokio::main]
 async fn main() -> InfraResult<()> {
@@ -18,32 +30,37 @@ async fn main() -> InfraResult<()> {
 
     tracing_subscriber::fmt::init();
 
-    let config = load_guard_config()?;
+    let executor_config = load_guard_executor_config()?;
+    let static_config = load_static_protect_config()?;
+    let profit_lock_config = load_profit_lock_config()?;
+    let outside_range_config = load_okx_outside_range_cancel_config()?;
     info!(
-        mode = ?config.guard.mode,
-        exchanges = ?config.guard.exchanges,
+        mode = ?executor_config.mode,
+        exchanges = ?executor_config.exchanges,
         "starting extrema guard"
     );
 
-    let executor = GuardExecutor::connect(&config).await?;
-
-    let scheduler_task = AltTaskInfo {
-        alt_task_type: AltTaskType::TimeScheduler(Duration::from_secs(config.guard.poll_seconds)),
-        chunk: 1,
-        task_base_id: Some(config.guard.schedule_task_id),
-    };
-
-    let static_protect = StaticProtect::new(
-        &config.static_protect,
-        config.guard.schedule_task_id,
-        executor.clone(),
-    );
-    let profit_lock = ProfitLock::new(&config.profit_lock, config.guard.schedule_task_id, executor);
+    let executor = GuardExecutor::connect(&executor_config).await?;
+    let static_protect = StaticProtect::new(&static_config, executor.clone());
+    let profit_lock = ProfitLock::new(&profit_lock_config, executor.clone());
+    let outside_range = OkxOutsideRangeCancel::new(&outside_range_config, executor)?;
 
     let env = EnvBuilder::new()
-        .with_task(scheduler_task)
+        .with_task(schedule_task(
+            static_config.schedule_duration_sec,
+            static_config.schedule_task_id,
+        ))
+        .with_task(schedule_task(
+            profit_lock_config.schedule_duration_sec,
+            profit_lock_config.schedule_task_id,
+        ))
+        .with_task(schedule_task(
+            outside_range_config.schedule_duration_sec,
+            outside_range_config.schedule_task_id,
+        ))
         .with_strategy_module(static_protect)
         .with_strategy_module(profit_lock)
+        .with_strategy_module(outside_range)
         .build()?;
 
     env.execute().await;

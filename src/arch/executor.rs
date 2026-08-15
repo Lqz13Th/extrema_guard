@@ -1,5 +1,7 @@
 use std::{
     collections::HashMap,
+    env::current_dir,
+    fs,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -7,6 +9,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use serde::Deserialize;
 use tracing::{info, warn};
 
 use extrema_infra::{
@@ -21,16 +24,71 @@ use extrema_infra::{
     prelude::*,
 };
 
-use super::{
-    config::{GuardConfig, RunMode},
-    report::ActionLog,
-    safety::SafetyLimits,
-};
+use super::{report::ActionLog, safety::SafetyLimits};
 
 /// "guard" in hex; Hyperliquid cloids must be 0x-prefixed 128-bit hex.
 const OWN_ID_HEX_PREFIX: &str = "0x6775617264";
 
 static ORDER_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct GuardExecutorConfig {
+    pub mode: RunMode,
+    #[serde(default)]
+    pub i_understand_live_orders: bool,
+    pub exchanges: Vec<String>,
+    #[serde(default = "default_max_order_notional")]
+    pub max_order_notional: f64,
+    #[serde(default = "default_min_action_interval_ms")]
+    pub min_action_interval_ms: u64,
+    #[serde(default = "default_action_log")]
+    pub action_log: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunMode {
+    DryRun,
+    Live,
+}
+
+#[derive(Deserialize)]
+struct StrategyConfigToml {
+    guard_executor: GuardExecutorConfig,
+}
+
+impl GuardExecutorConfig {
+    pub fn validate(&self) -> InfraResult<()> {
+        if self.exchanges.is_empty() {
+            return Err(InfraError::Msg(
+                "guard_executor.exchanges must not be empty".to_string(),
+            ));
+        }
+        if self.mode == RunMode::Live && !self.i_understand_live_orders {
+            return Err(InfraError::Msg(
+                "live mode requires i_understand_live_orders = true".to_string(),
+            ));
+        }
+        if !self.max_order_notional.is_finite() || self.max_order_notional <= 0.0 {
+            return Err(InfraError::Msg(
+                "guard_executor.max_order_notional must be finite and positive".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn load_guard_executor_config() -> InfraResult<GuardExecutorConfig> {
+    let path = current_dir()
+        .map_err(InfraError::Io)?
+        .join("strategy_config.toml");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| InfraError::Msg(format!("read {}: {err}", path.display())))?;
+    let wrapper: StrategyConfigToml = toml::from_str(&raw)
+        .map_err(|err| InfraError::Msg(format!("parse {}: {err}", path.display())))?;
+    wrapper.guard_executor.validate()?;
+    Ok(wrapper.guard_executor)
+}
 
 #[derive(Clone, Debug)]
 pub struct PositionSnapshot {
@@ -76,9 +134,10 @@ impl GuardExecutor {
     /// Builds one client per configured exchange, loads API keys from the
     /// environment, and warms the per-venue instrument metadata cache used
     /// for tick/lot rounding. Fails hard if metadata cannot be fetched.
-    pub async fn connect(config: &GuardConfig) -> InfraResult<Self> {
-        let mut slots = Vec::with_capacity(config.guard.exchanges.len());
-        for name in &config.guard.exchanges {
+    pub async fn connect(config: &GuardExecutorConfig) -> InfraResult<Self> {
+        config.validate()?;
+        let mut slots = Vec::with_capacity(config.exchanges.len());
+        for name in &config.exchanges {
             let mut client = lob_client_for(name)?;
             client.init_api_key();
             let infos = client
@@ -102,9 +161,9 @@ impl GuardExecutor {
         }
         Ok(Self {
             slots: Arc::new(slots),
-            limits: SafetyLimits::from_config(config),
-            dry_run: config.guard.mode == RunMode::DryRun,
-            log: ActionLog::new(&config.guard.action_log),
+            limits: SafetyLimits::new(config.max_order_notional, config.min_action_interval_ms),
+            dry_run: config.mode == RunMode::DryRun,
+            log: ActionLog::new(&config.action_log),
             last_action: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -119,6 +178,17 @@ impl GuardExecutor {
 
     pub fn exchanges(&self) -> impl Iterator<Item = &str> {
         self.slots.iter().map(|slot| slot.name.as_str())
+    }
+
+    /// Returns the shared exchange client for read-only module queries.
+    /// Modules must route mutations through `GuardExecutor` so throttling and
+    /// audit behavior remain process-wide.
+    pub fn exchange_reader(&self, exchange: &str) -> InfraResult<LobClients> {
+        Ok(self.slot(exchange)?.client.clone())
+    }
+
+    pub fn audit(&self, event: &str) {
+        self.log.record(event);
     }
 
     /// All open perp positions across configured exchanges, sizes signed.
@@ -441,7 +511,7 @@ impl GuardExecutor {
     fn check_notional(&self, position: &PositionSnapshot, notional: f64) -> InfraResult<()> {
         if notional > self.limits.max_order_notional {
             return Err(InfraError::Msg(format!(
-                "{} {}: order notional {notional:.2} exceeds max_order_notional {}; raise the limit in guard.toml if intended",
+                "{} {}: order notional {notional:.2} exceeds max_order_notional {}; raise the limit in strategy_config.toml if intended",
                 position.exchange, position.inst, self.limits.max_order_notional
             )));
         }
@@ -476,6 +546,18 @@ fn lob_client_for(name: &str) -> InfraResult<LobClients> {
             "unsupported exchange: {other} (expected hyperliquid | binance_um | okx | gate_futures)"
         ))),
     }
+}
+
+fn default_max_order_notional() -> f64 {
+    250_000.0
+}
+
+fn default_min_action_interval_ms() -> u64 {
+    1_000
+}
+
+fn default_action_log() -> String {
+    "guard_actions.log".to_string()
 }
 
 /// Venue-legal guard order ids: Hyperliquid requires 0x-prefixed 128-bit hex,
