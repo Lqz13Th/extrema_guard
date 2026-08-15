@@ -75,12 +75,26 @@ flowchart TB
 Here, pluggable means ordinary Rust modules composed at compile time. There is
 no dynamic library ABI or runtime plugin loader.
 
-## Composition
+## Using as a library
 
-The application binary chooses the schedule tasks and modules that make up one
-deployment:
+A strategy repository depends on both crates: `extrema_infra` supplies the
+runtime and exchange contracts, while `extrema_guard` supplies reusable guard
+modules and the shared executor.
+
+```toml
+[dependencies]
+extrema_infra = { version = "0.3.5", features = ["lob_clients"] }
+extrema_guard = "0.1.0"
+```
+
+Use compatible `extrema_infra` versions in both dependency paths so Cargo
+resolves one set of runtime traits and exchange types. The application binary
+then chooses the schedule tasks and modules that make up one deployment:
 
 ```rust,ignore
+use extrema_guard::prelude::*;
+use extrema_infra::prelude::*;
+
 let executor = GuardExecutor::connect(&executor_config).await?;
 
 let env = EnvBuilder::new()
@@ -130,7 +144,7 @@ built-in configuration.
 
 ## Adding a module
 
-Use [`src/bin/guard_custom_template.rs`](src/bin/guard_custom_template.rs) as a
+Use [`examples/guard_custom_template.rs`](examples/guard_custom_template.rs) as a
 minimal external-assembly example:
 
 1. Implement `Strategy`, `CommandEmitter`, and the required `EventHandler`
@@ -162,7 +176,6 @@ The OKX module is deliberately narrower than a generic stale-order canceller:
 - Before cancellation it reloads open orders and prices. After the cancel ACK,
   it queries the exact order once; an unconfirmed outcome stays tracked for the
   next schedule.
-- A full 100-order page fails closed because the scan may be incomplete.
 
 The timer is persisted atomically in `outside_range_state.toml`, so a short
 process restart does not silently turn a continuous-observation policy into an

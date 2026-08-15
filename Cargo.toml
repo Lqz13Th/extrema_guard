@@ -2,9 +2,12 @@
 name = "extrema_guard"
 version = "0.1.0"
 edition = "2024"
+readme = "README.md"
 license = "Apache-2.0"
-description = "Composable account and order guard runtime built on extrema_infra."
+description = "Composable guard strategy modules built on extrema_infra."
 repository = "https://github.com/Lqz13Th/extrema_guard"
+homepage = "https://github.com/Lqz13Th/extrema_guard"
+documentation = "https://docs.rs/extrema_guard"
 keywords = ["crypto", "trading", "risk-management", "order-management"]
 categories = ["finance"]
 
@@ -16,9 +19,12 @@ path = "src/lib.rs"
 name = "guard"
 path = "src/main.rs"
 
-[[bin]]
+[[example]]
 name = "guard_custom_template"
-path = "src/bin/guard_custom_template.rs"
+path = "examples/guard_custom_template.rs"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 extrema_infra = { version = "0.3.5", features = ["lob_clients"] }
