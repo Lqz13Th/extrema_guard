@@ -7,16 +7,8 @@ use std::{env::current_dir, fs, sync::Arc, time::Duration};
 use serde::Deserialize;
 use tracing::info;
 
+use extrema_guard::prelude::*;
 use extrema_infra::prelude::*;
-
-use extrema_guard::arch::{
-    executor::{GuardExecutor, load_guard_executor_config},
-    okx_outside_range_cancel_module::{
-        base::OkxOutsideRangeCancel, utils::load_okx_outside_range_cancel_config,
-    },
-    profit_lock_module::{base::ProfitLock, utils::load_profit_lock_config},
-    static_protect_module::{base::StaticProtect, utils::load_static_protect_config},
-};
 
 #[derive(Clone, Debug, Deserialize)]
 struct MyCustomExitConfig {
