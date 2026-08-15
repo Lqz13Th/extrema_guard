@@ -1,0 +1,30 @@
+[guard]
+mode = "dry-run"                 # dry-run | live
+i_understand_live_orders = false # must be true before mode = "live" is accepted
+exchanges = ["hyperliquid"]      # hyperliquid | binance_um | okx | gate_futures
+poll_seconds = 5
+schedule_task_id = 8
+# Loud-failure cap against absurd computed order sizes. Modules that place
+# orders must pass this shared limit before submitting an action.
+max_order_notional = 250000.0
+min_action_interval_ms = 1000
+action_log = "guard_actions.log"
+
+# Strategy 1: static protection from entry price.
+# Per rule: exactly one of sl_pct / sl_risk; tp_pct / tp_risk optional.
+# *_risk is a quote-currency amount for the whole position (offset = risk / |size|).
+[[static_protect.rules]]
+inst = "ETH_USDC_PERP"
+sl_risk = 10.0
+tp_risk = 30.0
+
+[[static_protect.rules]]
+inst = "BTC_USDC_PERP"
+sl_pct = 3.0
+
+# Strategy 2: profit lock. After price moves activation_pct past entry,
+# keep a protective exit armed at lock_pct past entry.
+[[profit_lock.rules]]
+inst = "ETH_USDC_PERP"
+activation_pct = 5.0
+lock_pct = 1.0

@@ -1,0 +1,29 @@
+# ===== AI Agent (personal) =====
+**/CLAUDE.md
+.claude/
+.cursor/
+
+# ===== IDE / OS =====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ===== Secrets & Local Config =====
+**/.env
+**/.env.*
+*.env
+/guard.toml
+**/strategy_config.toml
+**/account_config.json
+**/trader_config.json
+
+# ===== Runtime Artifacts =====
+*.csv
+*.log
+outputs/
+infra_logs/
+
+# ===== Rust =====
+target/
+**/target/
