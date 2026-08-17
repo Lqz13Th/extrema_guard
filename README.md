@@ -84,7 +84,7 @@ modules and the shared executor.
 ```toml
 [dependencies]
 extrema_infra = { version = "0.3.5", features = ["lob_clients"] }
-extrema_guard = "0.1.0"
+extrema_guard = "0.1.1"
 ```
 
 Use compatible `extrema_infra` versions in both dependency paths so Cargo
@@ -167,15 +167,18 @@ The OKX module is deliberately narrower than a generic stale-order canceller:
   TP/SL bracket.
 - Split attachments, trailing stops, ratio brackets, take-profit limit orders,
   and partially filled orders are not eligible.
+- In net mode, an order opposite the current signed position is not treated as
+  an entry. In long/short mode, only `buy + long` and `sell + short` qualify.
 - It always compares against OKX `last`, independent of the bracket's stored
   trigger-price type.
 - Price must remain strictly beyond the same TP or SL boundary for the complete
   configured interval.
 - Returning inside, changing breach side, modifying the order, stale price
   data, clock reversal, or an observation gap resets tracking.
-- Before cancellation it reloads open orders and prices. After the cancel ACK,
-  it queries the exact order once; an unconfirmed outcome stays tracked for the
-  next schedule.
+- Before cancellation it reloads account mode, net positions, open orders, and
+  prices. The candidate must still be eligible and must be the only pending
+  order on its instrument. After the cancel ACK, it queries the exact order
+  once; an unconfirmed outcome stays tracked for the next schedule.
 
 The timer is persisted atomically in `outside_range_state.toml`, so a short
 process restart does not silently turn a continuous-observation policy into an

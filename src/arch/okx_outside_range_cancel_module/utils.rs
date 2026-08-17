@@ -71,6 +71,7 @@ pub(crate) struct OrderInput {
     pub order_id: String,
     pub client_order_id: Option<String>,
     pub side: String,
+    pub position_side: Option<String>,
     pub order_type: String,
     pub state: String,
     pub category: Option<String>,
@@ -90,6 +91,12 @@ pub(crate) struct OrderInput {
 pub(crate) enum Direction {
     Long,
     Short,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OkxPositionMode {
+    Net,
+    LongShort,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,7 +119,11 @@ pub(crate) struct GuardOrder {
     pub fingerprint: String,
 }
 
-pub(crate) fn guard_order(raw: &OrderInput) -> Result<GuardOrder, &'static str> {
+pub(crate) fn guard_order(
+    raw: &OrderInput,
+    position_mode: OkxPositionMode,
+    net_position: Option<f64>,
+) -> Result<GuardOrder, &'static str> {
     if !matches!(
         raw.inst_type,
         InstrumentType::Perpetual | InstrumentType::Futures
@@ -154,11 +165,14 @@ pub(crate) fn guard_order(raw: &OrderInput) -> Result<GuardOrder, &'static str> 
     }
     let take_profit = bracket.take_profit.ok_or("missing_take_profit")?;
     let stop_loss = bracket.stop_loss.ok_or("missing_stop_loss")?;
-    let direction = match raw.side.as_str() {
-        "buy" if stop_loss < entry && entry < take_profit => Direction::Long,
-        "sell" if take_profit < entry && entry < stop_loss => Direction::Short,
-        _ => return Err("invalid_bracket_geometry"),
+    let direction = order_direction(raw, position_mode, net_position)?;
+    let valid_geometry = match direction {
+        Direction::Long => stop_loss < entry && entry < take_profit,
+        Direction::Short => take_profit < entry && entry < stop_loss,
     };
+    if !valid_geometry {
+        return Err("invalid_bracket_geometry");
+    }
     if raw.order_id.is_empty() {
         return Err("missing_order_id");
     }
@@ -185,6 +199,37 @@ pub(crate) fn guard_order(raw: &OrderInput) -> Result<GuardOrder, &'static str> 
         stop_loss,
         fingerprint,
     })
+}
+
+fn order_direction(
+    raw: &OrderInput,
+    position_mode: OkxPositionMode,
+    net_position: Option<f64>,
+) -> Result<Direction, &'static str> {
+    let position_side = raw.position_side.as_deref().unwrap_or_default();
+    match position_mode {
+        OkxPositionMode::Net => {
+            let net_position = net_position
+                .filter(|position| position.is_finite())
+                .ok_or("net_position_context_missing")?;
+            if !matches!(position_side, "" | "net") {
+                return Err("unexpected_position_side_for_net_mode");
+            }
+            match raw.side.as_str() {
+                "sell" if net_position > 0.0 => Err("net_order_may_reduce_or_reverse_long"),
+                "buy" if net_position < 0.0 => Err("net_order_may_reduce_or_reverse_short"),
+                "buy" => Ok(Direction::Long),
+                "sell" => Ok(Direction::Short),
+                _ => Err("unsupported_side"),
+            }
+        },
+        OkxPositionMode::LongShort => match (raw.side.as_str(), position_side) {
+            ("buy", "long") => Ok(Direction::Long),
+            ("sell", "short") => Ok(Direction::Short),
+            ("sell", "long") | ("buy", "short") => Err("hedge_mode_close_order"),
+            _ => Err("ambiguous_hedge_mode_order"),
+        },
+    }
 }
 
 pub(crate) fn breach(order: &GuardOrder, last: f64) -> Option<Breach> {
@@ -331,6 +376,7 @@ mod tests {
             order_id: "42".to_string(),
             client_order_id: Some("manual42".to_string()),
             side: side.to_string(),
+            position_side: Some("net".to_string()),
             order_type: "limit".to_string(),
             state: "live".to_string(),
             category: Some("normal".to_string()),
@@ -358,12 +404,22 @@ mod tests {
 
     #[test]
     fn boundaries_are_strict_for_long_and_short() {
-        let long = guard_order(&input("buy", 100.0, 110.0, 90.0)).unwrap();
+        let long = guard_order(
+            &input("buy", 100.0, 110.0, 90.0),
+            OkxPositionMode::Net,
+            Some(0.0),
+        )
+        .unwrap();
         assert_eq!(breach(&long, 110.0), None);
         assert_eq!(breach(&long, 110.01), Some(Breach::TakeProfit));
         assert_eq!(breach(&long, 89.99), Some(Breach::StopLoss));
 
-        let short = guard_order(&input("sell", 100.0, 90.0, 110.0)).unwrap();
+        let short = guard_order(
+            &input("sell", 100.0, 90.0, 110.0),
+            OkxPositionMode::Net,
+            Some(0.0),
+        )
+        .unwrap();
         assert_eq!(breach(&short, 90.0), None);
         assert_eq!(breach(&short, 89.99), Some(Breach::TakeProfit));
         assert_eq!(breach(&short, 110.01), Some(Breach::StopLoss));
@@ -373,8 +429,15 @@ mod tests {
     fn partial_fill_and_invalid_geometry_are_rejected() {
         let mut partial = input("buy", 100.0, 110.0, 90.0);
         partial.executed_size = Some(0.1);
-        assert!(guard_order(&partial).is_err());
-        assert!(guard_order(&input("buy", 100.0, 90.0, 110.0)).is_err());
+        assert!(guard_order(&partial, OkxPositionMode::Net, Some(0.0)).is_err());
+        assert!(
+            guard_order(
+                &input("buy", 100.0, 90.0, 110.0),
+                OkxPositionMode::Net,
+                Some(0.0),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -382,14 +445,70 @@ mod tests {
         let mut dynamic = input("buy", 100.0, 110.0, 90.0);
         dynamic.attached[0].unsupported = true;
         assert_eq!(
-            guard_order(&dynamic).unwrap_err(),
+            guard_order(&dynamic, OkxPositionMode::Net, Some(0.0)).unwrap_err(),
             "dynamic_bracket_not_supported"
         );
     }
 
     #[test]
+    fn net_mode_rejects_orders_that_may_reduce_or_reverse() {
+        let buy = input("buy", 100.0, 110.0, 90.0);
+        let sell = input("sell", 100.0, 90.0, 110.0);
+
+        assert!(guard_order(&buy, OkxPositionMode::Net, Some(2.0)).is_ok());
+        assert_eq!(
+            guard_order(&sell, OkxPositionMode::Net, Some(2.0)).unwrap_err(),
+            "net_order_may_reduce_or_reverse_long"
+        );
+        assert!(guard_order(&sell, OkxPositionMode::Net, Some(-2.0)).is_ok());
+        assert_eq!(
+            guard_order(&buy, OkxPositionMode::Net, Some(-2.0)).unwrap_err(),
+            "net_order_may_reduce_or_reverse_short"
+        );
+
+        let mut unexpected_side = buy.clone();
+        unexpected_side.position_side = Some("long".to_string());
+        assert_eq!(
+            guard_order(&unexpected_side, OkxPositionMode::Net, Some(0.0)).unwrap_err(),
+            "unexpected_position_side_for_net_mode"
+        );
+        assert_eq!(
+            guard_order(&buy, OkxPositionMode::Net, None).unwrap_err(),
+            "net_position_context_missing"
+        );
+    }
+
+    #[test]
+    fn hedge_mode_accepts_only_open_direction_pairs() {
+        let mut long_open = input("buy", 100.0, 110.0, 90.0);
+        long_open.position_side = Some("long".to_string());
+        assert!(guard_order(&long_open, OkxPositionMode::LongShort, None).is_ok());
+
+        let mut short_open = input("sell", 100.0, 90.0, 110.0);
+        short_open.position_side = Some("short".to_string());
+        assert!(guard_order(&short_open, OkxPositionMode::LongShort, None).is_ok());
+
+        long_open.side = "sell".to_string();
+        assert_eq!(
+            guard_order(&long_open, OkxPositionMode::LongShort, None).unwrap_err(),
+            "hedge_mode_close_order"
+        );
+
+        short_open.side = "buy".to_string();
+        assert_eq!(
+            guard_order(&short_open, OkxPositionMode::LongShort, None).unwrap_err(),
+            "hedge_mode_close_order"
+        );
+    }
+
+    #[test]
     fn timer_requires_continuous_same_side_observations() {
-        let order = guard_order(&input("buy", 100.0, 110.0, 90.0)).unwrap();
+        let order = guard_order(
+            &input("buy", 100.0, 110.0, 90.0),
+            OkxPositionMode::Net,
+            Some(0.0),
+        )
+        .unwrap();
         let mut tracker = OutsideTracker::default();
         let (first, _) = tracker.observe(&order, Breach::TakeProfit, 1_000_000, 90_000_000);
         let (elapsed, _) =
