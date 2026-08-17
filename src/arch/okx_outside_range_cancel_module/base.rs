@@ -15,13 +15,42 @@ use extrema_infra::{
 use crate::arch::executor::GuardExecutor;
 
 use super::utils::{
-    BracketInput, Breach, GuardOrder, OkxOutsideRangeCancelConfig, OrderInput, OutsideTracker,
-    breach, guard_order,
+    BracketInput, Breach, GuardOrder, OkxOutsideRangeCancelConfig, OkxPositionMode, OrderInput,
+    OutsideTracker, breach, guard_order,
 };
 
 const PAGE_LIMIT: u32 = 100;
 const MAX_PRICE_AGE_US: u64 = 120_000_000;
 const FUTURE_PRICE_TOLERANCE_US: u64 = 5_000_000;
+
+struct PendingSnapshot {
+    guard_orders: Vec<GuardOrder>,
+    pending_by_instrument: HashMap<String, Vec<String>>,
+}
+
+impl PendingSnapshot {
+    fn other_order_ids(&self, venue_inst: &str, order_id: &str) -> Vec<&str> {
+        self.pending_by_instrument
+            .get(venue_inst)
+            .into_iter()
+            .flatten()
+            .filter(|other_id| other_id.as_str() != order_id)
+            .map(String::as_str)
+            .collect()
+    }
+}
+
+struct AccountContext {
+    position_mode: OkxPositionMode,
+    net_positions: HashMap<String, f64>,
+}
+
+impl AccountContext {
+    fn net_position(&self, inst: &str) -> Option<f64> {
+        (self.position_mode == OkxPositionMode::Net)
+            .then(|| self.net_positions.get(inst).copied().unwrap_or_default())
+    }
+}
 
 #[derive(Clone)]
 pub struct OkxOutsideRangeCancel {
@@ -63,7 +92,8 @@ impl OkxOutsideRangeCancel {
     }
 
     pub(crate) async fn reconcile(&mut self) -> InfraResult<()> {
-        let orders = self.fetch_guard_orders().await?;
+        let snapshot = self.fetch_pending_snapshot().await?;
+        let orders = snapshot.guard_orders;
         let order_ids = orders
             .iter()
             .map(|order| order.order_id.clone())
@@ -106,15 +136,22 @@ impl OkxOutsideRangeCancel {
         &mut self,
         candidates: Vec<(GuardOrder, Breach)>,
     ) -> InfraResult<()> {
-        let current = self
-            .fetch_guard_orders()
-            .await?
-            .into_iter()
+        let snapshot = self.fetch_pending_snapshot().await?;
+        let current = snapshot
+            .guard_orders
+            .iter()
+            .cloned()
             .map(|order| (order.order_id.clone(), order))
             .collect::<HashMap<_, _>>();
         let preflight_orders = candidates
             .iter()
-            .filter_map(|(candidate, _)| current.get(&candidate.order_id).cloned())
+            .filter_map(|(candidate, _)| {
+                let other_ids =
+                    snapshot.other_order_ids(&candidate.venue_inst, &candidate.order_id);
+                (other_ids.is_empty())
+                    .then(|| current.get(&candidate.order_id).cloned())
+                    .flatten()
+            })
             .collect::<Vec<_>>();
         let prices = self.fetch_last_prices(&preflight_orders).await?;
         let now_us = now_micros()?;
@@ -125,6 +162,18 @@ impl OkxOutsideRangeCancel {
                 state_changed |= self.tracker.reset(&candidate.order_id);
                 continue;
             };
+            let other_ids = snapshot.other_order_ids(&order.venue_inst, &order.order_id);
+            if !other_ids.is_empty() {
+                self.executor.audit(&format!(
+                    "outside_range preflight_aborted inst={} order_id={} reason=other_pending_order_on_same_instrument other_order_ids={}",
+                    order.inst,
+                    order.order_id,
+                    other_ids.join(",")
+                ));
+                self.reset(order, "other_pending_order_on_same_instrument");
+                state_changed = true;
+                continue;
+            }
             let Some(last) = usable_last(prices.get(&order.inst), now_us) else {
                 self.reset(order, "preflight_last_price_unavailable");
                 state_changed = true;
@@ -184,7 +233,7 @@ impl OkxOutsideRangeCancel {
         Ok(())
     }
 
-    async fn fetch_guard_orders(&self) -> InfraResult<Vec<GuardOrder>> {
+    async fn fetch_pending_snapshot(&self) -> InfraResult<PendingSnapshot> {
         let LobClients::Okx(client) = self.executor.exchange_reader("okx")? else {
             return Err(InfraError::Msg(
                 "okx reader has unexpected type".to_string(),
@@ -215,8 +264,17 @@ impl OkxOutsideRangeCancel {
             ));
         }
         rows.extend(futures);
+        let account = Self::fetch_account_context(&client).await?;
 
-        Ok(rows
+        let mut pending_by_instrument = HashMap::<String, Vec<String>>::new();
+        for row in &rows {
+            pending_by_instrument
+                .entry(row.instId.clone())
+                .or_default()
+                .push(row.ordId.clone());
+        }
+
+        let guard_orders = rows
             .into_iter()
             .filter_map(|raw| {
                 let input = OrderInput {
@@ -230,6 +288,7 @@ impl OkxOutsideRangeCancel {
                     order_id: raw.ordId,
                     client_order_id: raw.clOrdId.filter(|value| !value.is_empty()),
                     side: raw.side,
+                    position_side: raw.posSide.map(|value| value.to_ascii_lowercase()),
                     order_type: raw.ordType,
                     state: raw.state,
                     category: raw.category,
@@ -271,7 +330,11 @@ impl OkxOutsideRangeCancel {
                         stop_loss: parse_positive(raw.slTriggerPx.as_deref()),
                     },
                 };
-                match guard_order(&input) {
+                match guard_order(
+                    &input,
+                    account.position_mode,
+                    account.net_position(&input.inst),
+                ) {
                     Ok(order) => Some(order),
                     Err(reason) => {
                         debug!(
@@ -284,7 +347,55 @@ impl OkxOutsideRangeCancel {
                     },
                 }
             })
-            .collect())
+            .collect();
+
+        Ok(PendingSnapshot {
+            guard_orders,
+            pending_by_instrument,
+        })
+    }
+
+    async fn fetch_account_context(client: &OkxCli) -> InfraResult<AccountContext> {
+        let position_mode = client
+            .get_account_config()
+            .await?
+            .into_iter()
+            .next()
+            .and_then(|config| config.posMode)
+            .ok_or_else(|| InfraError::Msg("OKX account config missing posMode".to_string()))?;
+        let position_mode = match position_mode.as_str() {
+            "net_mode" => OkxPositionMode::Net,
+            "long_short_mode" => OkxPositionMode::LongShort,
+            other => {
+                return Err(InfraError::Msg(format!(
+                    "unsupported OKX position mode: {other}"
+                )));
+            },
+        };
+
+        let mut net_positions = HashMap::new();
+        if position_mode == OkxPositionMode::Net {
+            for position in client.get_positions(None).await? {
+                if !matches!(
+                    position.inst_type,
+                    InstrumentType::Perpetual | InstrumentType::Futures
+                ) {
+                    continue;
+                }
+                if position.position_side != PositionSide::Both || !position.size.is_finite() {
+                    return Err(InfraError::Msg(format!(
+                        "invalid net position context for {}",
+                        position.inst
+                    )));
+                }
+                *net_positions.entry(position.inst).or_insert(0.0) += position.size;
+            }
+        }
+
+        Ok(AccountContext {
+            position_mode,
+            net_positions,
+        })
     }
 
     async fn fetch_last_prices(
@@ -403,4 +514,29 @@ fn now_micros() -> InfraResult<u64> {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_micros() as u64)
         .map_err(|err| InfraError::Msg(format!("system clock is before unix epoch: {err}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_instrument_pending_orders_are_detected() {
+        let snapshot = PendingSnapshot {
+            guard_orders: Vec::new(),
+            pending_by_instrument: HashMap::from([
+                (
+                    "ETH-USDT-SWAP".to_string(),
+                    vec!["candidate".to_string(), "other".to_string()],
+                ),
+                ("BTC-USDT-SWAP".to_string(), vec!["btc".to_string()]),
+            ]),
+        };
+
+        assert_eq!(
+            snapshot.other_order_ids("ETH-USDT-SWAP", "candidate"),
+            vec!["other"]
+        );
+        assert!(snapshot.other_order_ids("BTC-USDT-SWAP", "btc").is_empty());
+    }
 }
