@@ -431,21 +431,24 @@ impl OkxOutsideRangeCancel {
                 "okx reader has unexpected type".to_string(),
             ));
         };
-        let row = client
+        let row = match client
             .get_order_raw(OkxOrderReq {
                 inst_id: order.venue_inst.clone(),
                 ord_id: Some(order.order_id.clone()),
                 ..Default::default()
             })
-            .await?
-            .into_iter()
-            .next();
-        let Some(row) = row else {
-            self.executor.audit(&format!(
-                "outside_range cancel_confirmation_missing inst={} order_id={}",
-                order.inst, order.order_id
-            ));
-            return Ok(false);
+            .await
+        {
+            Ok(row) => row,
+            // OKX 51603: the order does not exist (yet); keep polling.
+            Err(err) if err.to_string().contains("51603") => {
+                self.executor.audit(&format!(
+                    "outside_range cancel_confirmation_missing inst={} order_id={}",
+                    order.inst, order.order_id
+                ));
+                return Ok(false);
+            },
+            Err(err) => return Err(err),
         };
         let filled = parse_non_negative(row.accFillSz.as_deref()).unwrap_or_default();
         let terminal = matches!(row.state.as_str(), "canceled" | "mmp_canceled" | "filled");
