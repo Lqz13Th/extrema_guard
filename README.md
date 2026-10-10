@@ -83,8 +83,8 @@ modules and the shared executor.
 
 ```toml
 [dependencies]
-extrema_infra = { version = "0.5.2", features = ["lob_clients"] }
-extrema_guard = "0.1.9"
+extrema_infra = { version = "0.6.0", features = ["lob_clients"] }
+extrema_guard = "0.2.0"
 ```
 
 Use compatible `extrema_infra` versions in both dependency paths so Cargo
